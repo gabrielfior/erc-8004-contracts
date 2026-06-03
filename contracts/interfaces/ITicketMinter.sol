@@ -20,12 +20,6 @@ interface ITicketMinter {
         TicketStatus status;
     }
 
-    struct SettlePayment {
-        address token;
-        address payTo;
-        uint256 amount;
-    }
-
     /// @notice EIP-3009 settlement parameters (mirrors USDC's `transferWithAuthorization(...,bytes)`).
     struct EIP3009Settlement {
         address token;
@@ -54,15 +48,6 @@ interface ITicketMinter {
     );
 
     event TicketConsumed(uint256 indexed ticketId, address indexed payer);
-
-    function settleAndMintTicket(
-        address payer,
-        uint256 agentId,
-        bytes32 requestHash,
-        bytes32 interactionHash,
-        string calldata endpoint,
-        SettlePayment calldata payment
-    ) external returns (uint256 ticketId);
 
     function settleAndMintTicketEIP3009(
         address payer,

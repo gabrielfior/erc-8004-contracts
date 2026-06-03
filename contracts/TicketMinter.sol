@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-
 import {ISignatureTransfer} from "./interfaces/ISignatureTransfer.sol";
 import {IIdentityRegistry} from "./interfaces/IIdentityRegistry.sol";
 import {ITicketMinter} from "./interfaces/ITicketMinter.sol";
@@ -24,17 +20,19 @@ interface IERC3009 {
 }
 
 /// @title TicketMinter
-/// @notice Mints an on-chain x402 job ticket atomically with token settlement. Vendored from x402.
-/// @dev Supports three settlement modes:
-///        1. ERC-20 `transferFrom` (requires prior approval).
-///        2. EIP-3009 `transferWithAuthorization` — direct call into the token.
-///        3. Permit2 `permitWitnessTransferFrom` — TicketMinter is the spender, witness binds ticket metadata.
-///      Recovery: standard x402 PAYMENT-RESPONSE tx hash → receipt → TicketMinted.ticketId.
+/// @notice Mints an on-chain x402 job ticket atomically with token settlement.
+/// @dev PERMISSIONLESS minting. Both settlement paths are self-authorizing — the
+///      payer's own signature authorizes the exact transfer (amount + destination),
+///      so no facilitator allowlist is required:
+///        1. EIP-3009 `transferWithAuthorization` — payer-signed, the token verifies it.
+///        2. Permit2 `permitWitnessTransferFrom` — payer-signed, the witness binds ticket
+///           metadata and destination.
+///      The approval-based `transferFrom` path was intentionally removed: it would let an
+///      arbitrary caller drain a payer's standing approval, which is exactly what an
+///      allowlist would otherwise have to guard against.
 /// @dev NON-UPGRADEABLE. Deploy per chain with `reputationRegistry_` set to the (already-deployed)
 ///      ReputationRegistry proxy address; that binding is immutable and survives registry upgrades.
-contract TicketMinter is ITicketMinter, Ownable {
-    using SafeERC20 for IERC20;
-
+contract TicketMinter is ITicketMinter {
     /// @notice EIP-712 type string for the Permit2 witness binding the ticket.
     string public constant TICKET_WITNESS_TYPE_STRING =
         "TicketWitness witness)TicketWitness(address payer,uint256 agentId,bytes32 requestHash,bytes32 interactionHash,string endpoint,address payTo,uint256 validAfter)TokenPermissions(address token,uint256 amount)";
@@ -48,13 +46,11 @@ contract TicketMinter is ITicketMinter, Ownable {
     IIdentityRegistry public immutable identityRegistry;
 
     mapping(uint256 => Ticket) private _tickets;
-    mapping(address => bool) public facilitators;
 
     address public immutable reputationRegistry;
 
     uint256 private _nextTicketId = 1;
 
-    error NotFacilitator();
     error NotReputationRegistry();
     error InvalidRegistry();
     error InvalidPayment();
@@ -64,49 +60,20 @@ contract TicketMinter is ITicketMinter, Ownable {
     error InvalidPermit2();
     error InvalidAgent();
 
-    modifier onlyFacilitator() {
-        if (!facilitators[msg.sender]) revert NotFacilitator();
-        _;
-    }
-
     modifier onlyReputationRegistry() {
         if (msg.sender != reputationRegistry) revert NotReputationRegistry();
         _;
     }
 
-    /// @param owner_ Owner of the minter (controls facilitator allowlist).
     /// @param permit2_ Canonical Permit2 address. Pass `address(0)` if Permit2 is not used on this chain.
     /// @param reputationRegistry_ ReputationRegistry proxy allowed to call `consumeTicket` (immutable).
     /// @param identityRegistry_ ERC-8004 identity registry; `agentId` must exist at mint time.
-    constructor(address owner_, address permit2_, address reputationRegistry_, address identityRegistry_)
-        Ownable(owner_)
-    {
+    constructor(address permit2_, address reputationRegistry_, address identityRegistry_) {
         if (reputationRegistry_ == address(0)) revert InvalidRegistry();
         if (identityRegistry_ == address(0)) revert InvalidRegistry();
         reputationRegistry = reputationRegistry_;
         identityRegistry = IIdentityRegistry(identityRegistry_);
         PERMIT2 = ISignatureTransfer(permit2_);
-    }
-
-    function setFacilitator(address facilitator, bool enabled) external onlyOwner {
-        facilitators[facilitator] = enabled;
-    }
-
-    function settleAndMintTicket(
-        address payer,
-        uint256 agentId,
-        bytes32 requestHash,
-        bytes32 interactionHash,
-        string calldata endpoint,
-        SettlePayment calldata payment
-    ) external onlyFacilitator returns (uint256 ticketId) {
-        if (payer == address(0) || payment.token == address(0) || payment.payTo == address(0) || payment.amount == 0) {
-            revert InvalidPayment();
-        }
-
-        IERC20(payment.token).safeTransferFrom(payer, payment.payTo, payment.amount);
-
-        ticketId = _mintTicket(payer, agentId, requestHash, interactionHash, endpoint);
     }
 
     function settleAndMintTicketEIP3009(
@@ -116,7 +83,7 @@ contract TicketMinter is ITicketMinter, Ownable {
         bytes32 interactionHash,
         string calldata endpoint,
         EIP3009Settlement calldata settlement
-    ) external onlyFacilitator returns (uint256 ticketId) {
+    ) external returns (uint256 ticketId) {
         if (payer == address(0) || settlement.token == address(0) || settlement.payTo == address(0) || settlement.value == 0) {
             revert InvalidPayment();
         }
@@ -143,7 +110,7 @@ contract TicketMinter is ITicketMinter, Ownable {
         bytes32 interactionHash,
         string calldata endpoint,
         Permit2Settlement calldata settlement
-    ) external onlyFacilitator returns (uint256 ticketId) {
+    ) external returns (uint256 ticketId) {
         if (address(PERMIT2) == address(0)) revert InvalidPermit2();
         if (
             payer == address(0) || settlement.payTo == address(0) || settlement.permit.permitted.token == address(0)

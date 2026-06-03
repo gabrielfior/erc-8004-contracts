@@ -77,8 +77,9 @@ describe("ReputationRegistry v2 -> v3 upgrade", async function () {
     // --- Upgrade to v3 (atomic upgradeToAndCall -> initializeV3) ---
     const v3Impl = await viem.deployContract("ReputationRegistryUpgradeable");
     // Deploy the paired minter bound to THIS proxy (immutable reputationRegistry).
+    // Args: (permit2, reputationRegistry, identityRegistry). permit2=0 (we use EIP-3009 here).
     const minter = await viem.deployContract("TicketMinter",
-      [owner.account.address, zeroAddress, proxyAddr, identity.address]);
+      [zeroAddress, proxyAddr, identity.address]);
 
     // Pass zeroAddress for identity to prove it persisted across the upgrade.
     const initV3 = encodeFunctionData({
@@ -128,21 +129,55 @@ describe("ReputationRegistry v2 -> v3 upgrade", async function () {
     assert.equal(f4[0], 70n);
     assert.equal(f4[5], false);
 
-    // --- New ticket-gated path ---
-    const token = await viem.deployContract("MockERC20");
+    // --- New ticket-gated path (permissionless, EIP-3009 signed settlement) ---
+    const token = await viem.deployContract("MockERC3009");
     await token.write.mint([payer.account.address, 1000n]);
-    await token.write.approve([minter.address, 1000n], { account: payer.account });
-    await minter.write.setFacilitator([owner.account.address, true], { account: owner.account });
+
+    const chainId = await publicClient.getChainId();
+    const validBefore = 99999999999n; // far future
+    const authNonce = fh("auth-1");
+    // Payer signs an EIP-3009 authorization to move 1000 to payTo (owner). No approval, no allowlist.
+    const eip3009Sig = await payer.signTypedData({
+      domain: { name: "Mock3009", version: "1", chainId, verifyingContract: token.address },
+      types: {
+        TransferWithAuthorization: [
+          { name: "from", type: "address" },
+          { name: "to", type: "address" },
+          { name: "value", type: "uint256" },
+          { name: "validAfter", type: "uint256" },
+          { name: "validBefore", type: "uint256" },
+          { name: "nonce", type: "bytes32" },
+        ],
+      },
+      primaryType: "TransferWithAuthorization",
+      message: {
+        from: payer.account.address,
+        to: owner.account.address,
+        value: 1000n,
+        validAfter: 0n,
+        validBefore,
+        nonce: authNonce,
+      },
+    });
 
     const minterTyped = await viem.getContractAt("TicketMinter", minter.address);
     const ticketId = await minterTyped.read.nextTicketId(); // id that will be assigned
     const requestHash = fh("req");
     const interactionHash = fh("interaction");
     const feedbackHash = fh("ticket-fb");
-    await minterTyped.write.settleAndMintTicket(
+    // `client2` relays the mint — proving minting is permissionless (not the payer, not an allowlisted facilitator).
+    await minterTyped.write.settleAndMintTicketEIP3009(
       [payer.account.address, agentId, requestHash, interactionHash, "https://svc",
-        { token: token.address, payTo: owner.account.address, amount: 1000n }],
-      { account: owner.account });
+        {
+          token: token.address,
+          payTo: owner.account.address,
+          value: 1000n,
+          validAfter: 0n,
+          validBefore,
+          nonce: authNonce,
+          signature: eip3009Sig,
+        }],
+      { account: client2.account });
 
     // Payer submits ticket-backed feedback
     await v3.write.giveFeedbackWithTicket(

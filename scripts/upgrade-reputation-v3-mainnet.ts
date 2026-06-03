@@ -93,11 +93,12 @@ async function main() {
   console.log("");
 
   // --- 2. Compute & deploy TicketMinter via CREATE2 ---
-  // constructor(address owner_, address permit2_, address reputationRegistry_, address identityRegistry_)
+  // constructor(address permit2_, address reputationRegistry_, address identityRegistry_)
+  // Permissionless minting (EIP-3009 / Permit2 self-authorizing) — no owner / facilitator allowlist.
   const minterArtifact = await hre.artifacts.readArtifact("TicketMinter");
   const minterCtorArgs = encodeAbiParameters(
-    [{ type: "address" }, { type: "address" }, { type: "address" }, { type: "address" }],
-    [EXPECTED_OWNER as Hex, PERMIT2_ADDRESS as Hex, reputationProxy, identityProxy]
+    [{ type: "address" }, { type: "address" }, { type: "address" }],
+    [PERMIT2_ADDRESS as Hex, reputationProxy, identityProxy]
   );
   const minterInitcode = ((minterArtifact.bytecode as Hex) + minterCtorArgs.slice(2)) as Hex;
   const minterAddress = getCreate2Address({
@@ -107,8 +108,7 @@ async function main() {
   });
   const minterDeployData = (TICKET_MINTER_SALT + minterInitcode.slice(2)) as Hex;
 
-  console.log("2. TicketMinter (owner, permit2, reputationRegistry, identityRegistry)");
-  console.log("   owner:              ", EXPECTED_OWNER);
+  console.log("2. TicketMinter (permit2, reputationRegistry, identityRegistry)");
   console.log("   permit2:            ", PERMIT2_ADDRESS);
   console.log("   reputationRegistry: ", reputationProxy);
   console.log("   identityRegistry:   ", identityProxy);
@@ -157,8 +157,8 @@ async function main() {
     console.log("");
   }
 
-  console.log("Follow-up (manual, owner-only): allowlist the x402 facilitator(s):");
-  console.log(`   TicketMinter(${minterAddress}).setFacilitator(<facilitatorAddress>, true)`);
+  console.log("Note: minting is permissionless (EIP-3009 / Permit2 self-authorizing).");
+  console.log("      No facilitator allowlist to configure.");
   console.log("");
   console.log(EXECUTE ? "✅ Done." : "DRY RUN complete. Re-run with EXECUTE=true to broadcast.");
 }
