@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+
 import {ISignatureTransfer} from "./interfaces/ISignatureTransfer.sol";
 import {IIdentityRegistry} from "./interfaces/IIdentityRegistry.sol";
 import {ITicketMinter} from "./interfaces/ITicketMinter.sol";
@@ -32,7 +35,16 @@ interface IERC3009 {
 ///      allowlist would otherwise have to guard against.
 /// @dev NON-UPGRADEABLE. Deploy per chain with `reputationRegistry_` set to the (already-deployed)
 ///      ReputationRegistry proxy address; that binding is immutable and survives registry upgrades.
-contract TicketMinter is ITicketMinter {
+contract TicketMinter is ITicketMinter, EIP712 {
+    using ECDSA for bytes32;
+
+    /// @notice EIP-712 typehash for the payer's ticket-metadata authorization on the EIP-3009 path.
+    ///         Binds the ticket metadata to the exact payment (token/payTo/value/nonce), so a relayer
+    ///         cannot re-attribute a payer's EIP-3009 payment to a different agent/interaction.
+    bytes32 public constant TICKET_MINT_AUTHORIZATION_TYPEHASH = keccak256(
+        "TicketMintAuthorization(uint256 agentId,bytes32 requestHash,bytes32 interactionHash,string endpoint,address token,address payTo,uint256 value,bytes32 nonce)"
+    );
+
     /// @notice EIP-712 type string for the Permit2 witness binding the ticket.
     string public constant TICKET_WITNESS_TYPE_STRING =
         "TicketWitness witness)TicketWitness(address payer,uint256 agentId,bytes32 requestHash,bytes32 interactionHash,string endpoint,address payTo,uint256 validAfter)TokenPermissions(address token,uint256 amount)";
@@ -59,6 +71,7 @@ contract TicketMinter is ITicketMinter {
     error PaymentTooEarly();
     error InvalidPermit2();
     error InvalidAgent();
+    error InvalidMintAuthorization();
 
     modifier onlyReputationRegistry() {
         if (msg.sender != reputationRegistry) revert NotReputationRegistry();
@@ -68,7 +81,9 @@ contract TicketMinter is ITicketMinter {
     /// @param permit2_ Canonical Permit2 address. Pass `address(0)` if Permit2 is not used on this chain.
     /// @param reputationRegistry_ ReputationRegistry proxy allowed to call `consumeTicket` (immutable).
     /// @param identityRegistry_ ERC-8004 identity registry; `agentId` must exist at mint time.
-    constructor(address permit2_, address reputationRegistry_, address identityRegistry_) {
+    constructor(address permit2_, address reputationRegistry_, address identityRegistry_)
+        EIP712("ERC8004TicketMinter", "1")
+    {
         if (reputationRegistry_ == address(0)) revert InvalidRegistry();
         if (identityRegistry_ == address(0)) revert InvalidRegistry();
         reputationRegistry = reputationRegistry_;
@@ -88,8 +103,30 @@ contract TicketMinter is ITicketMinter {
             revert InvalidPayment();
         }
 
+        // Verify the payer's metadata authorization. EIP-3009's own signature binds only
+        // token/to/value/nonce, NOT the ticket metadata — so we require a second payer
+        // signature committing (agentId, requestHash, interactionHash, endpoint) to this
+        // exact payment. This is what keeps permissionless minting trustless on this path.
+        bytes32 metaHash = keccak256(
+            abi.encode(
+                TICKET_MINT_AUTHORIZATION_TYPEHASH,
+                agentId,
+                requestHash,
+                interactionHash,
+                keccak256(bytes(endpoint)),
+                settlement.token,
+                settlement.payTo,
+                settlement.value,
+                settlement.nonce
+            )
+        );
+        if (_hashTypedDataV4(metaHash).recover(settlement.metadataSignature) != payer) {
+            revert InvalidMintAuthorization();
+        }
+
         // EIP-3009: payer signed an authorization to move `value` from `payer` to `payTo`.
         // Token contract checks the signature; we just forward the call.
+        // Replay-safe: the token marks `nonce` used, so this whole call cannot be replayed.
         IERC3009(settlement.token).transferWithAuthorization(
             payer,
             settlement.payTo,

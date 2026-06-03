@@ -165,6 +165,48 @@ describe("ReputationRegistry v2 -> v3 upgrade", async function () {
     const requestHash = fh("req");
     const interactionHash = fh("interaction");
     const feedbackHash = fh("ticket-fb");
+
+    // Second payer signature (Option 3): binds the ticket metadata to THIS payment, so a
+    // relayer can't re-attribute the EIP-3009 payment to another agent/interaction.
+    const metadataSig = await payer.signTypedData({
+      domain: { name: "ERC8004TicketMinter", version: "1", chainId, verifyingContract: minter.address },
+      types: {
+        TicketMintAuthorization: [
+          { name: "agentId", type: "uint256" },
+          { name: "requestHash", type: "bytes32" },
+          { name: "interactionHash", type: "bytes32" },
+          { name: "endpoint", type: "string" },
+          { name: "token", type: "address" },
+          { name: "payTo", type: "address" },
+          { name: "value", type: "uint256" },
+          { name: "nonce", type: "bytes32" },
+        ],
+      },
+      primaryType: "TicketMintAuthorization",
+      message: {
+        agentId,
+        requestHash,
+        interactionHash,
+        endpoint: "https://svc",
+        token: token.address,
+        payTo: owner.account.address,
+        value: 1000n,
+        nonce: authNonce,
+      },
+    });
+
+    // A relayer cannot re-attribute the payment to a different agent: the metadata
+    // signature was bound to `agentId`, so minting with agentId+1 must revert.
+    await assert.rejects(
+      minterTyped.write.settleAndMintTicketEIP3009(
+        [payer.account.address, agentId + 1n, requestHash, interactionHash, "https://svc",
+          {
+            token: token.address, payTo: owner.account.address, value: 1000n,
+            validAfter: 0n, validBefore, nonce: authNonce,
+            signature: eip3009Sig, metadataSignature: metadataSig,
+          }],
+        { account: client2.account }));
+
     // `client2` relays the mint — proving minting is permissionless (not the payer, not an allowlisted facilitator).
     await minterTyped.write.settleAndMintTicketEIP3009(
       [payer.account.address, agentId, requestHash, interactionHash, "https://svc",
@@ -176,6 +218,7 @@ describe("ReputationRegistry v2 -> v3 upgrade", async function () {
           validBefore,
           nonce: authNonce,
           signature: eip3009Sig,
+          metadataSignature: metadataSig,
         }],
       { account: client2.account });
 

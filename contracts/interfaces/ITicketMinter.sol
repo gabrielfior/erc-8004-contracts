@@ -21,6 +21,11 @@ interface ITicketMinter {
     }
 
     /// @notice EIP-3009 settlement parameters (mirrors USDC's `transferWithAuthorization(...,bytes)`).
+    /// @dev `signature` authorizes the token transfer (bound to token/to/value/nonce only).
+    ///      `metadataSignature` is a SECOND payer EIP-712 signature (TicketMintAuthorization) that
+    ///      binds the ticket metadata (agentId, requestHash, interactionHash, endpoint) to this exact
+    ///      payment — required because EIP-3009 itself does not commit to that metadata. This keeps
+    ///      permissionless minting trustless: a relayer cannot re-attribute the payment to another agent.
     struct EIP3009Settlement {
         address token;
         address payTo;
@@ -29,6 +34,7 @@ interface ITicketMinter {
         uint256 validBefore;
         bytes32 nonce;
         bytes signature;
+        bytes metadataSignature;
     }
 
     /// @notice Permit2 settlement parameters. The TicketMinter acts as the Permit2 spender.
