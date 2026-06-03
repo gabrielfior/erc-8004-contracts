@@ -171,12 +171,48 @@ This allows the value to persist when upgrading from MinimalUUPS to real impleme
 - Added `getVersion()` function for version tracking (currently `1.1.0`)
 - Added `_authorizeUpgrade()` for owner-only upgrades
 
-### ReputationRegistryUpgradeable
+### ReputationRegistryUpgradeable (v3.0.0)
 
 - `_identityRegistry` stored at slot 0 (not in ERC-7201 namespace)
 - Other data stored in ERC-7201 namespaced storage
 - Takes `identityRegistry` address in `initialize(address)` instead of constructor
 - Added upgrade authorization and versioning
+
+**v3 changes (append-only, x402 integration):**
+
+- Adds an optional, higher-trust x402 payment-gated feedback path
+  (`giveFeedbackWithTicket`, `giveFeedbackWithTicketFor`) alongside the
+  unchanged permissionless `giveFeedback`, plus agent-side `disputeFeedback`.
+- Storage is strictly append-only relative to v2 — verified by a layout gate
+  (`baseline/STORAGE_GATE.md`) and a runtime upgrade test (`test/upgrade-v3.ts`):
+  - `Feedback` gains a trailing `bool isDisputed` (packs into the existing slot-0
+    free space; legacy records read `false`).
+  - `ReputationRegistryStorage` appends `_ticketMinter`, `_usedFeedbackHash`,
+    `_feedbackNonces`.
+  - The ERC-7201 namespace location and slot-0 `_identityRegistry` are unchanged.
+- Inherits `EIP712Upgradeable` (domain `("ERC8004ReputationRegistry", "3")`) for
+  the sponsored-feedback intent signatures.
+- New initializer `initializeV3(identityRegistry, ticketMinter)` with
+  `reinitializer(3)`, run via `upgradeToAndCall` during the upgrade. Existing v2
+  proxies (`_initialized == 2`) and fresh proxies (`== 1`) both accept it. Pass
+  `address(0)` for `identityRegistry` to leave an already-set value untouched.
+- **Diverges from `ERC8004SPEC.md`**: `readFeedback` (+`isDisputed`),
+  `readAllFeedback` (+`disputedStatuses`), and `NewFeedback` (+`ticketId`) are
+  widened beyond the canonical signatures. `getSummary` excludes disputed
+  feedback in addition to revoked.
+
+### TicketMinter (non-upgradeable, paired per chain)
+
+- Mints x402 job tickets atomically with token settlement; consumed by the
+  paired `ReputationRegistryUpgradeable` proxy (immutable `reputationRegistry`).
+- **Permissionless** minting via self-authorizing settlement: EIP-3009
+  (`settleAndMintTicketEIP3009`) or Permit2 (`settleAndMintTicketPermit2`). No
+  facilitator allowlist.
+- EIP-3009 path requires a second payer EIP-712 signature
+  (`TicketMintAuthorization`, domain `("ERC8004TicketMinter", "1")`) binding the
+  ticket metadata to the exact payment; Permit2 binds it via its witness.
+- Deployed per chain with the existing CREATE2 factory; see
+  `scripts/upgrade-reputation-v3-mainnet.ts` (Ethereum Mainnet).
 
 ### ValidationRegistryUpgradeable
 
