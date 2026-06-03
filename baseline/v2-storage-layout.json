@@ -1,0 +1,19 @@
+{
+  "storage": [
+    {
+      "astId": 10163,
+      "contract": "project/contracts/ReputationRegistryUpgradeable.sol:ReputationRegistryUpgradeable",
+      "label": "_identityRegistry",
+      "offset": 0,
+      "slot": "0",
+      "type": "t_address"
+    }
+  ],
+  "types": {
+    "t_address": {
+      "encoding": "inplace",
+      "label": "address",
+      "numberOfBytes": "20"
+    }
+  }
+}

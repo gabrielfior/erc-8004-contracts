@@ -1,0 +1,112 @@
+{
+  "Feedback": {
+    "encoding": "inplace",
+    "label": "struct _LayoutProbeV2.Feedback",
+    "members": [
+      {
+        "astId": 3,
+        "contract": "project/contracts/_LayoutProbeV2.sol:_LayoutProbeV2",
+        "label": "value",
+        "offset": 0,
+        "slot": "0",
+        "type": "t_int128"
+      },
+      {
+        "astId": 5,
+        "contract": "project/contracts/_LayoutProbeV2.sol:_LayoutProbeV2",
+        "label": "valueDecimals",
+        "offset": 16,
+        "slot": "0",
+        "type": "t_uint8"
+      },
+      {
+        "astId": 7,
+        "contract": "project/contracts/_LayoutProbeV2.sol:_LayoutProbeV2",
+        "label": "isRevoked",
+        "offset": 17,
+        "slot": "0",
+        "type": "t_bool"
+      },
+      {
+        "astId": 9,
+        "contract": "project/contracts/_LayoutProbeV2.sol:_LayoutProbeV2",
+        "label": "tag1",
+        "offset": 0,
+        "slot": "1",
+        "type": "t_string_storage"
+      },
+      {
+        "astId": 11,
+        "contract": "project/contracts/_LayoutProbeV2.sol:_LayoutProbeV2",
+        "label": "tag2",
+        "offset": 0,
+        "slot": "2",
+        "type": "t_string_storage"
+      }
+    ],
+    "numberOfBytes": "96"
+  },
+  "ReputationRegistryStorage": {
+    "encoding": "inplace",
+    "label": "struct _LayoutProbeV2.ReputationRegistryStorage",
+    "members": [
+      {
+        "astId": 21,
+        "contract": "project/contracts/_LayoutProbeV2.sol:_LayoutProbeV2",
+        "label": "_feedback",
+        "offset": 0,
+        "slot": "0",
+        "type": "t_mapping(t_uint256,t_mapping(t_address,t_mapping(t_uint64,t_struct(Feedback)12_storage)))"
+      },
+      {
+        "astId": 27,
+        "contract": "project/contracts/_LayoutProbeV2.sol:_LayoutProbeV2",
+        "label": "_lastIndex",
+        "offset": 0,
+        "slot": "1",
+        "type": "t_mapping(t_uint256,t_mapping(t_address,t_uint64))"
+      },
+      {
+        "astId": 37,
+        "contract": "project/contracts/_LayoutProbeV2.sol:_LayoutProbeV2",
+        "label": "_responseCount",
+        "offset": 0,
+        "slot": "2",
+        "type": "t_mapping(t_uint256,t_mapping(t_address,t_mapping(t_uint64,t_mapping(t_address,t_uint64))))"
+      },
+      {
+        "astId": 46,
+        "contract": "project/contracts/_LayoutProbeV2.sol:_LayoutProbeV2",
+        "label": "_responders",
+        "offset": 0,
+        "slot": "3",
+        "type": "t_mapping(t_uint256,t_mapping(t_address,t_mapping(t_uint64,t_array(t_address)dyn_storage)))"
+      },
+      {
+        "astId": 56,
+        "contract": "project/contracts/_LayoutProbeV2.sol:_LayoutProbeV2",
+        "label": "_responderExists",
+        "offset": 0,
+        "slot": "4",
+        "type": "t_mapping(t_uint256,t_mapping(t_address,t_mapping(t_uint64,t_mapping(t_address,t_bool))))"
+      },
+      {
+        "astId": 61,
+        "contract": "project/contracts/_LayoutProbeV2.sol:_LayoutProbeV2",
+        "label": "_clients",
+        "offset": 0,
+        "slot": "5",
+        "type": "t_mapping(t_uint256,t_array(t_address)dyn_storage)"
+      },
+      {
+        "astId": 67,
+        "contract": "project/contracts/_LayoutProbeV2.sol:_LayoutProbeV2",
+        "label": "_clientExists",
+        "offset": 0,
+        "slot": "6",
+        "type": "t_mapping(t_uint256,t_mapping(t_address,t_bool))"
+      }
+    ],
+    "numberOfBytes": "224"
+  }
+}
