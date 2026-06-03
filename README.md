@@ -297,24 +297,62 @@ Treat the pair as a signed decimal number:
 
 This allows a single on-chain schema to represent percentages, scores, timings, dollar amounts, etc. (the meaning is conveyed by `tag1`/`tag2` and/or the off-chain file).
 
+> **Implementation version 3.0.0 — diverges from the base `ERC8004SPEC.md` signatures.**
+> v3 adds an optional x402 payment-gated feedback path, agent-side disputes, and EIP-712
+> sponsored submission. To support these, three read/event signatures were **widened** beyond
+> the canonical spec (see "v3 divergences" below). Storage is append-only, so all feedback
+> recorded under earlier versions is preserved unchanged.
+
 #### Give feedback
 
-`giveFeedback(...)` records feedback for an agent. The implementation prevents **self-feedback** from the agent owner or approved operators (checked via the Identity Registry).
+`giveFeedback(...)` records permissionless feedback for an agent (unchanged from v2). The
+implementation prevents **self-feedback** from the agent owner or approved operators (checked
+via the Identity Registry).
+
+#### Payment-gated feedback (x402 tickets) — v3
+
+A higher-trust, optional path: feedback backed by an on-chain x402 payment ticket.
+
+- A `TicketMinter` (deployed per chain, paired with this registry) mints a ticket atomically
+  with a token settlement. Minting is **permissionless** and uses self-authorizing settlement —
+  EIP-3009 (`settleAndMintTicketEIP3009`) or Permit2 (`settleAndMintTicketPermit2`) — so the
+  payer's own signature authorizes the exact transfer. There is **no facilitator allowlist**.
+- On the EIP-3009 path the payer provides a **second** EIP-712 signature
+  (`TicketMintAuthorization`) binding the ticket metadata (agentId, hashes, endpoint) to the
+  exact payment, so a relayer cannot re-attribute the payment to another agent. (Permit2 binds
+  this via its witness, so it needs only one signature.)
+- `giveFeedbackWithTicket(...)` — the payer consumes a ticket and records feedback.
+- `giveFeedbackWithTicketFor(submission, nonce, deadline, signature)` — the payer signs an
+  EIP-712 `FeedbackIntent` and any relayer may submit it (gas sponsorship). EIP-712 domain:
+  `("ERC8004ReputationRegistry", "3")`, `verifyingContract` = the registry proxy.
+
+Ticket-backed feedback flows into the same storage and reads as permissionless feedback; the
+`ticketId` (0 for permissionless) on the `NewFeedback` event distinguishes them.
 
 #### Read + aggregate
 
 Typical read paths:
 
-- `readFeedback(agentId, clientAddress, feedbackIndex)`
-- `readAllFeedback(agentId, clientAddresses, tag1, tag2, includeRevoked)`
-- `getSummary(agentId, clientAddresses, tag1, tag2)` → returns `(count, summaryValue, summaryValueDecimals)`
+- `readFeedback(agentId, clientAddress, feedbackIndex)` → `(value, valueDecimals, tag1, tag2, isRevoked, isDisputed)`
+- `readAllFeedback(agentId, clientAddresses, tag1, tag2, includeRevoked)` → also returns `disputedStatuses`
+- `getSummary(agentId, clientAddresses, tag1, tag2)` → returns `(count, summaryValue, summaryValueDecimals)`; excludes both **revoked** and **disputed** feedback.
 
 Note: `getSummary` requires `clientAddresses` to be provided (non-empty) to reduce Sybil/spam risk.
 
-#### Responses & revocation
+#### Responses, revocation & disputes
 
-- Clients can revoke their feedback: `revokeFeedback(agentId, feedbackIndex)`
+- Clients can revoke their own feedback: `revokeFeedback(agentId, feedbackIndex)`
+- Authorized agents can dispute feedback left against them: `disputeFeedback(agentId, clientAddress, feedbackIndex)` (distinct from client revocation).
 - Anyone can append responses: `appendResponse(agentId, clientAddress, feedbackIndex, responseURI, responseHash)`
+
+#### v3 divergences from `ERC8004SPEC.md`
+
+These three signatures intentionally differ from the canonical spec (off-chain consumers
+expecting the spec signatures must be updated for this registry):
+
+- `readFeedback` returns an extra trailing `bool isDisputed`.
+- `readAllFeedback` returns an extra trailing `bool[] disputedStatuses`.
+- `NewFeedback` carries an extra trailing `uint256 ticketId`.
 
 ## Suggested end-to-end flow
 
@@ -357,8 +395,10 @@ Tip: keep the on-chain call minimal (tags + numeric signal), and put verbose con
 ```
 contracts/
 ├── IdentityRegistryUpgradeable.sol     - ERC-721 based agent registration (upgradeable)
-├── ReputationRegistryUpgradeable.sol   - Feedback + aggregation (upgradeable)
-└── ValidationRegistryUpgradeable.sol   - Validation request/response (upgradeable)
+├── ReputationRegistryUpgradeable.sol   - Feedback + aggregation + x402 ticket-gating (upgradeable, v3)
+├── ValidationRegistryUpgradeable.sol   - Validation request/response (upgradeable)
+├── TicketMinter.sol                    - x402 payment ticket minter (non-upgradeable, paired per chain)
+└── interfaces/                         - ITicketMinter, IIdentityRegistry, ISignatureTransfer
 
 abis/                                  - Contract ABIs for integrations
 ignition/modules/                       - Deployment modules

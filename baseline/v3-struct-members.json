@@ -1,0 +1,102 @@
+{
+  "Feedback": [
+    {
+      "slot": "0",
+      "offset": 0,
+      "label": "value",
+      "typeLabel": "int128"
+    },
+    {
+      "slot": "0",
+      "offset": 16,
+      "label": "valueDecimals",
+      "typeLabel": "uint8"
+    },
+    {
+      "slot": "0",
+      "offset": 17,
+      "label": "isRevoked",
+      "typeLabel": "bool"
+    },
+    {
+      "slot": "0",
+      "offset": 18,
+      "label": "isDisputed",
+      "typeLabel": "bool"
+    },
+    {
+      "slot": "1",
+      "offset": 0,
+      "label": "tag1",
+      "typeLabel": "string"
+    },
+    {
+      "slot": "2",
+      "offset": 0,
+      "label": "tag2",
+      "typeLabel": "string"
+    }
+  ],
+  "ReputationRegistryStorage": [
+    {
+      "slot": "0",
+      "offset": 0,
+      "label": "_feedback",
+      "typeLabel": "mapping(uint256 => mapping(address => mapping(uint64 => struct X.Feedback)))"
+    },
+    {
+      "slot": "1",
+      "offset": 0,
+      "label": "_lastIndex",
+      "typeLabel": "mapping(uint256 => mapping(address => uint64))"
+    },
+    {
+      "slot": "2",
+      "offset": 0,
+      "label": "_responseCount",
+      "typeLabel": "mapping(uint256 => mapping(address => mapping(uint64 => mapping(address => uint64))))"
+    },
+    {
+      "slot": "3",
+      "offset": 0,
+      "label": "_responders",
+      "typeLabel": "mapping(uint256 => mapping(address => mapping(uint64 => address[])))"
+    },
+    {
+      "slot": "4",
+      "offset": 0,
+      "label": "_responderExists",
+      "typeLabel": "mapping(uint256 => mapping(address => mapping(uint64 => mapping(address => bool))))"
+    },
+    {
+      "slot": "5",
+      "offset": 0,
+      "label": "_clients",
+      "typeLabel": "mapping(uint256 => address[])"
+    },
+    {
+      "slot": "6",
+      "offset": 0,
+      "label": "_clientExists",
+      "typeLabel": "mapping(uint256 => mapping(address => bool))"
+    },
+    {
+      "slot": "7",
+      "offset": 0,
+      "label": "_ticketMinter",
+      "typeLabel": "address"
+    },
+    {
+      "slot": "8",
+      "offset": 0,
+      "label": "_usedFeedbackHash",
+      "typeLabel": "mapping(uint256 => mapping(address => mapping(bytes32 => bool)))"
+    },
+    {
+      "slot": "9",
+      "offset": 0,
+      "label": "_feedbackNonces",
+      "typeLabel": "mapping(address => mapping(uint256 => bool))"
+    }
+  ]
+}

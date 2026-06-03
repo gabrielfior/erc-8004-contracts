@@ -3,15 +3,31 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/cryptography/EIP712Upgradeable.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
-interface IIdentityRegistry {
-    function isAuthorizedOrOwner(address spender, uint256 agentId) external view returns (bool);
-}
+import {IIdentityRegistry} from "./interfaces/IIdentityRegistry.sol";
+import {ITicketMinter} from "./interfaces/ITicketMinter.sol";
 
-contract ReputationRegistryUpgradeable is OwnableUpgradeable, UUPSUpgradeable {
+/// @title ReputationRegistryUpgradeable (v3)
+/// @notice ERC-8004 feedback registry. v3 keeps the original permissionless feedback path
+///         intact and ADDS an optional, higher-trust x402 payment-gated path (ticket-backed),
+///         agent-side disputes, and EIP-712 sponsored/relayed feedback submission.
+/// @dev Storage is APPEND-ONLY relative to v2 — see baseline/INVARIANTS.md. `_identityRegistry`
+///      stays at slot 0; the ERC-7201 namespace location is unchanged; new fields are appended
+///      to `ReputationRegistryStorage` and the `Feedback` struct so all v2 feedback is preserved.
+contract ReputationRegistryUpgradeable is OwnableUpgradeable, UUPSUpgradeable, EIP712Upgradeable {
+    using ECDSA for bytes32;
 
     int128 private constant MAX_ABS_VALUE = 1e38;
 
+    /// @dev EIP-712 typehash for relayed/sponsored feedback intents.
+    bytes32 private constant FEEDBACK_INTENT_TYPEHASH = keccak256(
+        "FeedbackIntent(uint256 ticketId,bytes32 interactionHash,int128 value,uint8 valueDecimals,bytes32 tag1Hash,bytes32 tag2Hash,bytes32 endpointHash,bytes32 feedbackURIHash,bytes32 feedbackHash,uint256 nonce,uint256 deadline)"
+    );
+
+    /// @notice Emitted for BOTH feedback paths. `ticketId == 0` ⇒ permissionless legacy path;
+    ///         `ticketId > 0` ⇒ x402 payment-gated (ticket-backed) path.
     event NewFeedback(
         uint256 indexed agentId,
         address indexed clientAddress,
@@ -23,10 +39,18 @@ contract ReputationRegistryUpgradeable is OwnableUpgradeable, UUPSUpgradeable {
         string tag2,
         string endpoint,
         string feedbackURI,
-        bytes32 feedbackHash
+        bytes32 feedbackHash,
+        uint256 ticketId
     );
 
     event FeedbackRevoked(
+        uint256 indexed agentId,
+        address indexed clientAddress,
+        uint64 indexed feedbackIndex
+    );
+
+    /// @notice Emitted when an authorized agent disputes a feedback record (distinct from client revocation).
+    event FeedbackDisputed(
         uint256 indexed agentId,
         address indexed clientAddress,
         uint64 indexed feedbackIndex
@@ -41,15 +65,43 @@ contract ReputationRegistryUpgradeable is OwnableUpgradeable, UUPSUpgradeable {
         bytes32 responseHash
     );
 
+    // --- v3 ticket-path errors ---
+    error InvalidTicket();
+    error InteractionHashMismatch();
+    error SelfFeedbackNotAllowed();
+    error FeedbackHashAlreadyUsed();
+    error InvalidSignature();
+    error IntentExpired();
+    error InvalidNonce();
+    error NotAgentAuthorized();
+    error FeedbackNotFound();
+    error AlreadyDisputed();
+    error TicketMinterNotSet();
+
     struct Feedback {
-        int128 value;          // 16 bytes
-        uint8 valueDecimals;   // 1 byte  (packed with value + isRevoked)
-        bool isRevoked;        // 1 byte  (packed with value + valueDecimals)
-        string tag1;
-        string tag2;
+        int128 value;          // slot 0, bytes 0-15  (existing)
+        uint8 valueDecimals;   // slot 0, byte 16     (existing)
+        bool isRevoked;        // slot 0, byte 17     (existing — client retraction)
+        bool isDisputed;       // slot 0, byte 18     (v3 NEW — agent dispute; was zero for legacy records)
+        string tag1;           // slot 1              (existing)
+        string tag2;           // slot 2              (existing)
     }
 
-    /// @dev Identity registry address stored at slot 0 (matches MinimalUUPS)
+    /// @dev Parameters for a relayed/sponsored ticket-gated submission (EIP-712 signed by `payer`).
+    struct FeedbackSubmission {
+        address payer;
+        uint256 ticketId;
+        bytes32 interactionHash;
+        int128 value;
+        uint8 valueDecimals;
+        string tag1;
+        string tag2;
+        string endpoint;
+        string feedbackURI;
+        bytes32 feedbackHash;
+    }
+
+    /// @dev Identity registry address stored at slot 0 (matches MinimalUUPS). DO NOT MOVE.
     address private _identityRegistry;
 
     /// @custom:storage-location erc7201:erc8004.reputation.registry
@@ -66,6 +118,13 @@ contract ReputationRegistryUpgradeable is OwnableUpgradeable, UUPSUpgradeable {
         // Track all unique clients that have given feedback for each agent
         mapping(uint256 => address[]) _clients;
         mapping(uint256 => mapping(address => bool)) _clientExists;
+        // --- v3 additions (APPEND-ONLY) ---
+        // x402 ticket minter paired with this registry
+        address _ticketMinter;
+        // agentId => payer => feedbackHash => used (replay protection for ticket-backed feedback)
+        mapping(uint256 => mapping(address => mapping(bytes32 => bool))) _usedFeedbackHash;
+        // payer => nonce => used (replay protection for sponsored intents)
+        mapping(address => mapping(uint256 => bool)) _feedbackNonces;
     }
 
     // keccak256(abi.encode(uint256(keccak256("erc8004.reputation.registry.2")) - 1)) & ~bytes32(uint256(0xff))
@@ -83,15 +142,42 @@ contract ReputationRegistryUpgradeable is OwnableUpgradeable, UUPSUpgradeable {
         _disableInitializers();
     }
 
+    /// @notice v2 initializer — retained for backward compatibility with existing deployments.
     function initialize(address identityRegistry_) public reinitializer(2) onlyOwner {
         require(identityRegistry_ != address(0), "bad identity");
         _identityRegistry = identityRegistry_;
+    }
+
+    /// @notice v3 initializer. Run via `upgradeToAndCall` during the upgrade. Sets the paired
+    ///         TicketMinter and initializes EIP-712. `identityRegistry_` may be re-supplied (it is
+    ///         already set for existing v2 proxies; pass address(0) to leave it untouched).
+    function initializeV3(address identityRegistry_, address ticketMinter_) public reinitializer(3) onlyOwner {
+        require(ticketMinter_ != address(0), "bad minter");
+        __EIP712_init("ERC8004ReputationRegistry", "3");
+        if (identityRegistry_ != address(0)) {
+            _identityRegistry = identityRegistry_;
+        }
+        require(_identityRegistry != address(0), "identity not set");
+        _getReputationRegistryStorage()._ticketMinter = ticketMinter_;
     }
 
     function getIdentityRegistry() external view returns (address) {
         return _identityRegistry;
     }
 
+    function getTicketMinter() external view returns (address) {
+        return _getReputationRegistryStorage()._ticketMinter;
+    }
+
+    function domainSeparator() external view returns (bytes32) {
+        return _domainSeparatorV4();
+    }
+
+    // ---------------------------------------------------------------------
+    // Feedback submission
+    // ---------------------------------------------------------------------
+
+    /// @notice Permissionless feedback (legacy v2 path, unchanged behavior). Emits `ticketId == 0`.
     function giveFeedback(
         uint256 agentId,
         int128 value,
@@ -102,35 +188,61 @@ contract ReputationRegistryUpgradeable is OwnableUpgradeable, UUPSUpgradeable {
         string calldata feedbackURI,
         bytes32 feedbackHash
     ) external {
-        require(valueDecimals <= 18, "too many decimals");
-        require(value >= -MAX_ABS_VALUE && value <= MAX_ABS_VALUE, "value too large");
+        _validateValue(value, valueDecimals);
 
-        // SECURITY: Prevent self-feedback from owner and operators
-        // Also reverts with ERC721NonexistentToken if agent doesn't exist
+        // SECURITY: Prevent self-feedback from owner and operators.
+        // Also reverts with ERC721NonexistentToken if agent doesn't exist.
         require(!IIdentityRegistry(_identityRegistry).isAuthorizedOrOwner(msg.sender, agentId), "Self-feedback not allowed");
 
-        ReputationRegistryStorage storage $ = _getReputationRegistryStorage();
-
-        // Increment and get current index (1-indexed)
-        uint64 currentIndex = ++$._lastIndex[agentId][msg.sender];
-
-        // Store feedback
-        $._feedback[agentId][msg.sender][currentIndex] = Feedback({
-            value: value,
-            valueDecimals: valueDecimals,
-            tag1: tag1,
-            tag2: tag2,
-            isRevoked: false
-        });
-
-        // track new client
-        if (!$._clientExists[agentId][msg.sender]) {
-            $._clients[agentId].push(msg.sender);
-            $._clientExists[agentId][msg.sender] = true;
-        }
-
-        emit NewFeedback(agentId, msg.sender, currentIndex, value, valueDecimals, tag1, tag1, tag2, endpoint, feedbackURI, feedbackHash);
+        _recordFeedback(agentId, msg.sender, value, valueDecimals, tag1, tag2, endpoint, feedbackURI, feedbackHash, 0);
     }
+
+    /// @notice Higher-trust feedback backed by an x402 payment ticket. Caller is the payer.
+    function giveFeedbackWithTicket(
+        uint256 ticketId,
+        int128 value,
+        uint8 valueDecimals,
+        string calldata tag1,
+        string calldata tag2,
+        string calldata endpoint,
+        string calldata feedbackURI,
+        bytes32 interactionHash,
+        bytes32 feedbackHash
+    ) external {
+        _validateValue(value, valueDecimals);
+        uint256 agentId = _consumeTicketForFeedback(msg.sender, ticketId, interactionHash, feedbackHash);
+        _recordFeedback(agentId, msg.sender, value, valueDecimals, tag1, tag2, endpoint, feedbackURI, feedbackHash, ticketId);
+    }
+
+    /// @notice Relayed/sponsored ticket-backed feedback. `submission.payer` signs an EIP-712 intent;
+    ///         anyone may relay it (gas sponsorship). Feedback is attributed to `payer`.
+    function giveFeedbackWithTicketFor(
+        FeedbackSubmission calldata submission,
+        uint256 nonce,
+        uint256 deadline,
+        bytes calldata signature
+    ) external {
+        _verifyFeedbackIntent(submission, nonce, deadline, signature);
+        _validateValue(submission.value, submission.valueDecimals);
+        uint256 agentId =
+            _consumeTicketForFeedback(submission.payer, submission.ticketId, submission.interactionHash, submission.feedbackHash);
+        _recordFeedback(
+            agentId,
+            submission.payer,
+            submission.value,
+            submission.valueDecimals,
+            submission.tag1,
+            submission.tag2,
+            submission.endpoint,
+            submission.feedbackURI,
+            submission.feedbackHash,
+            submission.ticketId
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Moderation: client revoke (existing) + agent dispute (v3)
+    // ---------------------------------------------------------------------
 
     function revokeFeedback(uint256 agentId, uint64 feedbackIndex) external {
         require(feedbackIndex > 0, "index must be > 0");
@@ -140,6 +252,19 @@ contract ReputationRegistryUpgradeable is OwnableUpgradeable, UUPSUpgradeable {
 
         $._feedback[agentId][msg.sender][feedbackIndex].isRevoked = true;
         emit FeedbackRevoked(agentId, msg.sender, feedbackIndex);
+    }
+
+    /// @notice An authorized agent (owner/operator) disputes a feedback record left against it.
+    function disputeFeedback(uint256 agentId, address clientAddress, uint64 feedbackIndex) external {
+        if (!IIdentityRegistry(_identityRegistry).isAuthorizedOrOwner(msg.sender, agentId)) revert NotAgentAuthorized();
+        ReputationRegistryStorage storage $ = _getReputationRegistryStorage();
+        if (feedbackIndex == 0 || feedbackIndex > $._lastIndex[agentId][clientAddress]) revert FeedbackNotFound();
+
+        Feedback storage fb = $._feedback[agentId][clientAddress][feedbackIndex];
+        if (fb.isDisputed) revert AlreadyDisputed();
+        fb.isDisputed = true;
+
+        emit FeedbackDisputed(agentId, clientAddress, feedbackIndex);
     }
 
     function appendResponse(
@@ -166,6 +291,10 @@ contract ReputationRegistryUpgradeable is OwnableUpgradeable, UUPSUpgradeable {
         emit ResponseAppended(agentId, clientAddress, feedbackIndex, msg.sender, responseURI, responseHash);
     }
 
+    // ---------------------------------------------------------------------
+    // Views
+    // ---------------------------------------------------------------------
+
     function getLastIndex(uint256 agentId, address clientAddress) external view returns (uint64) {
         ReputationRegistryStorage storage $ = _getReputationRegistryStorage();
         return $._lastIndex[agentId][clientAddress];
@@ -174,13 +303,13 @@ contract ReputationRegistryUpgradeable is OwnableUpgradeable, UUPSUpgradeable {
     function readFeedback(uint256 agentId, address clientAddress, uint64 feedbackIndex)
         external
         view
-        returns (int128 value, uint8 valueDecimals, string memory tag1, string memory tag2, bool isRevoked)
+        returns (int128 value, uint8 valueDecimals, string memory tag1, string memory tag2, bool isRevoked, bool isDisputed)
     {
         ReputationRegistryStorage storage $ = _getReputationRegistryStorage();
         require(feedbackIndex > 0, "index must be > 0");
         require(feedbackIndex <= $._lastIndex[agentId][clientAddress], "index out of bounds");
         Feedback storage f = $._feedback[agentId][clientAddress][feedbackIndex];
-        return (f.value, f.valueDecimals, f.tag1, f.tag2, f.isRevoked);
+        return (f.value, f.valueDecimals, f.tag1, f.tag2, f.isRevoked, f.isDisputed);
     }
 
     function getSummary(
@@ -212,7 +341,8 @@ contract ReputationRegistryUpgradeable is OwnableUpgradeable, UUPSUpgradeable {
             uint64 lastIdx = $._lastIndex[agentId][clientList[i]];
             for (uint64 j = 1; j <= lastIdx; j++) {
                 Feedback storage fb = $._feedback[agentId][clientList[i]][j];
-                if (fb.isRevoked) continue;
+                // Exclude both client-revoked and agent-disputed feedback from the aggregate.
+                if (fb.isRevoked || fb.isDisputed) continue;
                 if (emptyHash != tag1Hash &&
                     tag1Hash != keccak256(bytes(fb.tag1))) continue;
                 if (emptyHash != tag2Hash &&
@@ -262,7 +392,8 @@ contract ReputationRegistryUpgradeable is OwnableUpgradeable, UUPSUpgradeable {
         uint8[] memory valueDecimals,
         string[] memory tag1s,
         string[] memory tag2s,
-        bool[] memory revokedStatuses
+        bool[] memory revokedStatuses,
+        bool[] memory disputedStatuses
     ) {
         ReputationRegistryStorage storage $ = _getReputationRegistryStorage();
         address[] memory clientList;
@@ -298,6 +429,7 @@ contract ReputationRegistryUpgradeable is OwnableUpgradeable, UUPSUpgradeable {
         tag1s = new string[](totalCount);
         tag2s = new string[](totalCount);
         revokedStatuses = new bool[](totalCount);
+        disputedStatuses = new bool[](totalCount);
 
         // Second pass: populate arrays
         uint256 idx;
@@ -318,6 +450,7 @@ contract ReputationRegistryUpgradeable is OwnableUpgradeable, UUPSUpgradeable {
                 tag1s[idx] = fb.tag1;
                 tag2s[idx] = fb.tag2;
                 revokedStatuses[idx] = fb.isRevoked;
+                disputedStatuses[idx] = fb.isDisputed;
                 idx++;
             }
         }
@@ -377,9 +510,107 @@ contract ReputationRegistryUpgradeable is OwnableUpgradeable, UUPSUpgradeable {
         return $._clients[agentId];
     }
 
+    // ---------------------------------------------------------------------
+    // Internal helpers
+    // ---------------------------------------------------------------------
+
+    function _validateValue(int128 value, uint8 valueDecimals) internal pure {
+        require(valueDecimals <= 18, "too many decimals");
+        require(value >= -MAX_ABS_VALUE && value <= MAX_ABS_VALUE, "value too large");
+    }
+
+    /// @dev Shared write path for both permissionless and ticket-backed feedback.
+    function _recordFeedback(
+        uint256 agentId,
+        address client,
+        int128 value,
+        uint8 valueDecimals,
+        string calldata tag1,
+        string calldata tag2,
+        string calldata endpoint,
+        string calldata feedbackURI,
+        bytes32 feedbackHash,
+        uint256 ticketId
+    ) internal {
+        ReputationRegistryStorage storage $ = _getReputationRegistryStorage();
+
+        // Increment and get current index (1-indexed)
+        uint64 currentIndex = ++$._lastIndex[agentId][client];
+
+        $._feedback[agentId][client][currentIndex] = Feedback({
+            value: value,
+            valueDecimals: valueDecimals,
+            isRevoked: false,
+            isDisputed: false,
+            tag1: tag1,
+            tag2: tag2
+        });
+
+        // track new client
+        if (!$._clientExists[agentId][client]) {
+            $._clients[agentId].push(client);
+            $._clientExists[agentId][client] = true;
+        }
+
+        emit NewFeedback(agentId, client, currentIndex, value, valueDecimals, tag1, tag1, tag2, endpoint, feedbackURI, feedbackHash, ticketId);
+    }
+
+    /// @dev Validates and consumes an x402 ticket, returning the agentId it was minted for.
+    function _consumeTicketForFeedback(address payer, uint256 ticketId, bytes32 interactionHash, bytes32 feedbackHash)
+        internal
+        returns (uint256 agentId)
+    {
+        ReputationRegistryStorage storage $ = _getReputationRegistryStorage();
+        address minter = $._ticketMinter;
+        if (minter == address(0)) revert TicketMinterNotSet();
+
+        ITicketMinter.Ticket memory ticket = ITicketMinter(minter).tickets(ticketId);
+        if (ticket.status != ITicketMinter.TicketStatus.MINTED) revert InvalidTicket();
+        if (ticket.payer != payer) revert InvalidTicket();
+        if (ticket.interactionHash != interactionHash) revert InteractionHashMismatch();
+        if (IIdentityRegistry(_identityRegistry).isAuthorizedOrOwner(payer, ticket.agentId)) revert SelfFeedbackNotAllowed();
+        if ($._usedFeedbackHash[ticket.agentId][payer][feedbackHash]) revert FeedbackHashAlreadyUsed();
+
+        $._usedFeedbackHash[ticket.agentId][payer][feedbackHash] = true;
+        ITicketMinter(minter).consumeTicket(ticketId, payer);
+        return ticket.agentId;
+    }
+
+    function _verifyFeedbackIntent(
+        FeedbackSubmission calldata submission,
+        uint256 nonce,
+        uint256 deadline,
+        bytes calldata signature
+    ) internal {
+        if (block.timestamp > deadline) revert IntentExpired();
+        ReputationRegistryStorage storage $ = _getReputationRegistryStorage();
+        if ($._feedbackNonces[submission.payer][nonce]) revert InvalidNonce();
+
+        bytes32 structHash = keccak256(
+            abi.encode(
+                FEEDBACK_INTENT_TYPEHASH,
+                submission.ticketId,
+                submission.interactionHash,
+                submission.value,
+                submission.valueDecimals,
+                keccak256(bytes(submission.tag1)),
+                keccak256(bytes(submission.tag2)),
+                keccak256(bytes(submission.endpoint)),
+                keccak256(bytes(submission.feedbackURI)),
+                submission.feedbackHash,
+                nonce,
+                deadline
+            )
+        );
+
+        address recovered = _hashTypedDataV4(structHash).recover(signature);
+        if (recovered != submission.payer) revert InvalidSignature();
+        $._feedbackNonces[submission.payer][nonce] = true;
+    }
+
     function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
 
     function getVersion() external pure returns (string memory) {
-        return "2.0.0";
+        return "3.0.0";
     }
 }

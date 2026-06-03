@@ -121,6 +121,19 @@ export const MAINNET_MINIMAL_UUPS_SALT = "0x000000000000000000000000000000000000
 export const SAFE_SINGLETON_FACTORY = "0x914d7Fec6aaC8cd542e72Bca78B30650d45643d7" as const;
 
 /**
+ * Canonical Permit2 address (same on all chains where deployed, incl. Ethereum Mainnet).
+ * Used by the v3 TicketMinter's Permit2 settlement path. Pass address(0) to disable Permit2.
+ */
+export const PERMIT2_ADDRESS = "0x000000000022D473030F116dDEE9F6B43aC78BA3" as const;
+
+/**
+ * CREATE2 salt for the v3 TicketMinter implementation.
+ * Note: the resulting address also depends on the constructor args
+ * (owner, permit2, reputationRegistry, identityRegistry), so it is per-chain.
+ */
+export const TICKET_MINTER_SALT = "0x0000000000000000000000000000000000000000000000000000000000000008" as Hex;
+
+/**
  * Expected owner address
  */
 export const EXPECTED_OWNER = "0x547289319C3e6aedB179C0b8e8aF0B5ACd062603" as const;

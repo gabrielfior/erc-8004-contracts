@@ -172,7 +172,7 @@ describe("ERC8004 Upgradeable Registries", async function () {
 
       // Verify initialization
       const version = await reputationRegistry.read.getVersion();
-      assert.equal(version, "2.0.0");
+      assert.equal(version, "3.0.0");
 
       const storedIdentityRegistry = await reputationRegistry.read.getIdentityRegistry();
       assert.equal(storedIdentityRegistry.toLowerCase(), identityRegistry.address.toLowerCase());

@@ -1,0 +1,81 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+import {ISignatureTransfer} from "./ISignatureTransfer.sol";
+
+/// @notice Interface for the on-chain x402 job-ticket minter. Vendored from x402.
+interface ITicketMinter {
+    enum TicketStatus {
+        NONE,
+        MINTED,
+        CONSUMED
+    }
+
+    struct Ticket {
+        address payer;
+        uint256 agentId;
+        bytes32 requestHash;
+        bytes32 interactionHash;
+        string endpoint;
+        TicketStatus status;
+    }
+
+    /// @notice EIP-3009 settlement parameters (mirrors USDC's `transferWithAuthorization(...,bytes)`).
+    /// @dev `signature` authorizes the token transfer (bound to token/to/value/nonce only).
+    ///      `metadataSignature` is a SECOND payer EIP-712 signature (TicketMintAuthorization) that
+    ///      binds the ticket metadata (agentId, requestHash, interactionHash, endpoint) to this exact
+    ///      payment — required because EIP-3009 itself does not commit to that metadata. This keeps
+    ///      permissionless minting trustless: a relayer cannot re-attribute the payment to another agent.
+    struct EIP3009Settlement {
+        address token;
+        address payTo;
+        uint256 value;
+        uint256 validAfter;
+        uint256 validBefore;
+        bytes32 nonce;
+        bytes signature;
+        bytes metadataSignature;
+    }
+
+    /// @notice Permit2 settlement parameters. The TicketMinter acts as the Permit2 spender.
+    struct Permit2Settlement {
+        ISignatureTransfer.PermitTransferFrom permit;
+        address payTo;
+        uint256 validAfter;
+        bytes signature;
+    }
+
+    event TicketMinted(
+        uint256 indexed ticketId,
+        address indexed payer,
+        uint256 indexed agentId,
+        bytes32 requestHash,
+        bytes32 interactionHash
+    );
+
+    event TicketConsumed(uint256 indexed ticketId, address indexed payer);
+
+    function settleAndMintTicketEIP3009(
+        address payer,
+        uint256 agentId,
+        bytes32 requestHash,
+        bytes32 interactionHash,
+        string calldata endpoint,
+        EIP3009Settlement calldata settlement
+    ) external returns (uint256 ticketId);
+
+    function settleAndMintTicketPermit2(
+        address payer,
+        uint256 agentId,
+        bytes32 requestHash,
+        bytes32 interactionHash,
+        string calldata endpoint,
+        Permit2Settlement calldata settlement
+    ) external returns (uint256 ticketId);
+
+    function consumeTicket(uint256 ticketId, address payer) external;
+
+    function tickets(uint256 ticketId) external view returns (Ticket memory);
+
+    function nextTicketId() external view returns (uint256);
+}

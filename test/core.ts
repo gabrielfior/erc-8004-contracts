@@ -687,7 +687,7 @@ describe("ERC8004 Registries", async function () {
         ], { account: client.account }),
         reputationRegistry,
         "NewFeedback",
-        [agentId, getAddress(client.account.address), 1n, score, 0, keccak256(toHex(tag1)), tag1, tag2, endpoint, fileuri, filehash]
+        [agentId, getAddress(client.account.address), 1n, score, 0, keccak256(toHex(tag1)), tag1, tag2, endpoint, fileuri, filehash, 0n]
       );
 
       // Read feedback back (use 1-based index)
